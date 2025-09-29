@@ -81,7 +81,7 @@ def get_min_max_by_time(hour=None, minute=None):
         12: {"min": 8000, "max": 14000},
         16: {"min": 10000, "max": 18000},
         20: {"min": 12000, "max": 22000},
-        22: {"min": 15000, "max": 24000}
+        22: {"min": 15000, "max": 35000}
     }
     #"""根据当前时间获取对应的步数范围"""
     current_hour = hour
