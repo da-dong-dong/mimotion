@@ -104,7 +104,7 @@ def get_min_max_by_time(hour=None, minute=None):
         steps = random.randint(step_config['min'], step_config['max'])
         logger.info(f"使用 {closest_hour} 点配置，生成步数: {steps}")
     else:
-        steps = DEFAULT_STEPS
+        steps = 29889
         logger.info(f"使用默认步数: {steps}")
          
     min_step = steps
