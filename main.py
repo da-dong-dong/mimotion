@@ -90,6 +90,7 @@ def get_min_max_by_time(hour=None, minute=None):
     # 找到最接近的配置时间段
     closest_hour = None
     steps = None
+    max_step = 35000
     min_diff = float('inf')
         
     for hour in STEP_RANGES.keys():
@@ -102,13 +103,14 @@ def get_min_max_by_time(hour=None, minute=None):
     if min_diff <= 2 and closest_hour in STEP_RANGES:
         step_config = STEP_RANGES[closest_hour]
         steps = random.randint(step_config['min'], step_config['max'])
+        max_step = step_config['max']
         logger.info(f"使用 {closest_hour} 点配置，生成步数: {steps}")
     else:
         steps = 29889
         logger.info(f"使用默认步数: {steps}")
          
     min_step = steps
-    max_step = get_int_value_default(config, "MAX_STEP", 24000)
+    # max_step = get_int_value_default(config, "MAX_STEP", 24000)
 
      # 计算当前时间对应的步数范围（避免低于最小步数）
     current_min = max(min_step, int(time_rate * min_step))
