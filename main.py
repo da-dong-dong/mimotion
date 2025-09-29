@@ -76,8 +76,8 @@ def get_min_max_by_time(hour=None, minute=None):
         time_rate = min((hour * 60 + minute) / (22 * 60), 1.0)
 
     # 从配置获取步数范围（支持自定义最小/最大步数）
-    min_step = get_int_value_default(config, "MIN_STEP", 6000)
-    max_step = get_int_value_default(config, "MAX_STEP", 24000)
+    min_step = 6000
+    max_step = 29998
     
     # 计算当前时间对应的步数范围（避免低于最小步数）
     current_min = max(min_step, int(time_rate * min_step))
