@@ -75,21 +75,40 @@ def get_min_max_by_time(hour=None, minute=None):
         # 时间比例：(当前分钟数)/(22小时总分钟数)
         time_rate = min((hour * 60 + minute) / (22 * 60), 1.0)
 
-    # 从配置获取步数范围（支持自定义最小/最大步数）
+    # 步数范围配置
     STEP_RANGES = {
         8: {"min": 6000, "max": 10000},
         12: {"min": 8000, "max": 14000},
         16: {"min": 10000, "max": 18000},
         20: {"min": 12000, "max": 22000},
-        22: {"min": 15000, "max": 29885}
+        22: {"min": 15000, "max": 24000}
     }
-
-    min_step = 6000
+    #"""根据当前时间获取对应的步数范围"""
+    current_hour = hour
+    logger.info(f"当前时间: {datetime.now()}, 小时: {current_hour}")
+        
+    # 找到最接近的配置时间段
+    closest_hour = None
+    steps = None
+    min_diff = float('inf')
+        
+    for hour in STEP_RANGES.keys():
+        diff = abs(current_hour - hour)
+        if diff < min_diff:
+            min_diff = diff
+            closest_hour = hour
+        
+    # 如果找到接近的配置且在合理范围内（2小时内），使用该配置
+    if min_diff <= 2 and closest_hour in STEP_RANGES:
+        step_config = STEP_RANGES[closest_hour]
+        steps = random.randint(step_config['min'], step_config['max'])
+        logger.info(f"使用 {closest_hour} 点配置，生成步数: {steps}")
+    else:
+        steps = DEFAULT_STEPS
+        logger.info(f"使用默认步数: {steps}")
+         
+    min_step = steps
     max_step = get_int_value_default(config, "MAX_STEP", 24000)
-    
-    # 计算当前时间对应的步数范围（避免低于最小步数）
-    current_min = max(int(time_rate * min_step), int(time_rate * min_step))
-    current_max = max(int(time_rate * max_step), int(time_rate * max_step))
     
     logger.info(f"当前时间[{hour:02d}:{minute:02d}]，步数范围：{current_min}~{current_max}")
     return current_min, current_max
