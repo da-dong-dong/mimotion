@@ -88,8 +88,8 @@ def get_min_max_by_time(hour=None, minute=None):
     max_step = get_int_value_default(config, "MAX_STEP", 24000)
     
     # 计算当前时间对应的步数范围（避免低于最小步数）
-    current_min = max(min_step, int(time_rate * min_step))
-    current_max = max(current_min, int(time_rate * max_step))
+    current_min = max(int(time_rate * min_step), int(time_rate * min_step))
+    current_max = max(int(time_rate * max_step), int(time_rate * max_step))
     
     logger.info(f"当前时间[{hour:02d}:{minute:02d}]，步数范围：{current_min}~{current_max}")
     return current_min, current_max
