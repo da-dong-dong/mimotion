@@ -84,8 +84,8 @@ def get_min_max_by_time(hour=None, minute=None):
         22: {"min": 15000, "max": 29885}
     }
 
-    min_step = STEP_RANGES[hour][min]
-    max_step = STEP_RANGES[hour][max]
+    min_step = 6000
+    max_step = 29885
     
     # 计算当前时间对应的步数范围（避免低于最小步数）
     current_min = max(min_step, int(time_rate * min_step))
