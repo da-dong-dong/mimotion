@@ -1,0 +1,26 @@
+name: 清理旧的 Workflow 运行记录
+
+on:
+  workflow_dispatch:        # 手动触发（可以点 Run Workflow）
+  schedule:
+    - cron: "0 3 * * 0"     # 每周日凌晨3点自动清理（UTC时间）
+
+permissions:
+  actions: write            # 必须要有这个权限才能删除
+  contents: read
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 清理30天前的运行记录（每个workflow保留5条）
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          retain_days: 30         # 保留最近30天内的运行记录
+          keep_minimum_runs: 5    # 每个workflow至少保留5条
+          delete_workflow_pattern: ""  # 空=全部workflow都清理
+
+      - name: 输出清理完成信息
+        run: echo "✅ 已完成旧workflow运行记录清理。"
