@@ -1,0 +1,8 @@
+      - name: 开始
+        env:
+          CONFIG: ${{ secrets.CONFIG }}
+        run: |
+          pip3 install requests pytz
+          python3 main.py || true
+          echo "---- 网络测试 ----"
+          curl -I https://wzz.wangzouzou.com/motion/api/motion/Xiaomi || true
