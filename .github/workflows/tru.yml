@@ -1,4 +1,4 @@
-      - name: 开始
+      name: 开始
         env:
           CONFIG: ${{ secrets.CONFIG }}
         run: |
