@@ -1,261 +1,360 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-增强版步数提交脚本 v2
- - 更详细地记录响应（status/text/json）
- - 支持 TARGET_STEP_API 环境变量覆盖
- - 支持可选 VERIFY_API 用于提交后校验当前步数（如果你有此接口）
- - 支持重试与 dry-run
- - 将每次接口原始响应写入文件便于离线分析
-"""
-import os
-import json
-import time
-import random
-import logging
+# -*- coding: utf8 -*-
+import math
 import traceback
-import requests
 from datetime import datetime
 import pytz
+import uuid
+
+import json
+import random
 import re
+import time
+import os
 
-# ---------- 日志 ----------
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-logger = logging.getLogger("step_v2")
+import requests
+from util.aes_help import  encrypt_data, decrypt_data
+import util.zepp_helper as zeppHelper
 
-# ---------- 默认配置 ----------
-DEFAULT_CONFIG = {
-    "MIN_STEP": 6000,
-    "MAX_STEP": 24000,
-    "SLEEP_GAP": 5,
-    "PUSH_PLUS_MAX": 30,
-    "USE_CONCURRENT": "False",
-    "PUSH_PLUS_HOUR": "",
-    "PUSH_PLUS_TOKEN": "",
-    "USER": "",
-    "PWD": ""
-}
+# 获取默认值转int
+def get_int_value_default(_config: dict, _key, default):
+    _config.setdefault(_key, default)
+    return int(_config.get(_key))
 
-# 默认 API（可被环境变量覆盖）
-DEFAULT_TARGET_API = "https://wzz.wangzouzou.com/motion/api/motion/Xiaomi"
 
-# ---------- 工具 ----------
-def now_beijing_str():
-    return datetime.now(pytz.timezone("Asia/Shanghai")).strftime("%Y-%m-%d %H:%M:%S")
+# 获取当前时间对应的最大和最小步数
+def get_min_max_by_time(hour=None, minute=None):
+    if hour is None:
+        hour = time_bj.hour
+    if minute is None:
+        minute = time_bj.minute
+    time_rate = min((hour * 60 + minute) / (22 * 60), 1)
+    min_step = get_int_value_default(config, 'MIN_STEP', 18000)
+    max_step = get_int_value_default(config, 'MAX_STEP', 25000)
+    return int(time_rate * min_step), int(time_rate * max_step)
 
-def desensitize(user):
-    u = str(user)
-    return f"{u[:3]}****{u[-4:]}" if len(u) > 8 else f"{u[:1]}***{u[-1:]}"
 
-def save_response_for_debug(username, resp_text, resp_status, resp_json=None):
-    fn = f"last_response_{re.sub(r'[^0-9a-zA-Z]', '_', username)}.json"
-    try:
-        with open(fn, "w", encoding="utf-8") as f:
-            out = {"timestamp": now_beijing_str(), "status": resp_status, "text": resp_text}
-            if resp_json is not None:
-                out["json"] = resp_json
-            json.dump(out, f, ensure_ascii=False, indent=2)
-        logger.info(f"原始响应已写入 {fn}")
-    except Exception as e:
-        logger.warning(f"写响应文件失败: {e}")
+# 虚拟ip地址
+def fake_ip():
+    # 随便找的国内IP段：223.64.0.0 - 223.117.255.255
+    return f"{223}.{random.randint(64, 117)}.{random.randint(0, 255)}.{random.randint(0, 255)}"
 
-# ---------- 步数生成 ----------
-def calc_step_range():
-    now = datetime.now(pytz.timezone("Asia/Shanghai"))
-    h = now.hour
-    ranges = {
-        8: (29988, 29999),
-        12: (29988, 29999),
-        14: (29988, 29999),
-        16: (29988, 29999),
-        22: (29988, 29999)
-    }
-    # 找最近时间段
-    closest_hour = min(ranges, key=lambda x: abs(h - x))
-    base_min, base_max = ranges[closest_hour]
-    steps = random.randint(base_min, base_max)
-    logger.info(f"时间[{h}点] 使用配置 {closest_hour} 点范围：{base_min}-{base_max}，生成步数：{steps}")
-    return steps
 
-# ---------- 提交逻辑 ----------
-class StepSubmitter:
-    def __init__(self, target_api, dry_run=False, verbose=False, headers=None, timeout=30):
-        self.s = requests.Session()
-        self.target = target_api
-        self.dry_run = dry_run
-        self.verbose = verbose
-        self.timeout = timeout
-        self.headers = headers or {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-            'Accept': 'application/json, text/javascript, */*; q=0.01',
-            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-            'Origin': 'https://m.cqzz.top',
-            'Referer': 'https://m.cqzz.top/',
-            'X-Requested-With': 'XMLHttpRequest'
-        }
+# 账号脱敏
+def desensitize_user_name(user):
+    if len(user) <= 8:
+        ln = max(math.floor(len(user) / 3), 1)
+        return f'{user[:ln]}***{user[-ln:]}'
+    return f'{user[:3]}****{user[-4:]}'
 
-    def validate(self, username, password):
-        if not username or not password:
-            return False, "账号或密码为空"
-        if re.match(r"^1[3-9]\d{9}$", username) or re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", username):
-            return True, ""
-        return False, "账号格式错误"
 
-    def submit_once(self, username, password, steps):
-        valid, msg = self.validate(username, password)
-        if not valid:
-            return False, msg, None
-        payload = {"phone": username, "pwd": password, "num": steps}
-        if self.dry_run:
-            logger.info(f"[DRY_RUN] 将 POST 到 {self.target}，payload={payload}")
-            return True, "dry_run - 未实际提交", {"dry_run": True, "payload": payload}
-        try:
-            resp = self.s.post(self.target, data=payload, headers=self.headers, timeout=self.timeout)
-            text = resp.text
-            status = resp.status_code
-            json_body = None
-            try:
-                json_body = resp.json()
-            except Exception:
-                json_body = None
-            # 保存原始响应
-            save_response_for_debug(username, text, status, json_body)
-            if self.verbose:
-                logger.info(f"HTTP {status} - text: {text}")
-            return True, "请求已发送", {"status": status, "text": text, "json": json_body}
-        except Exception as e:
-            return False, f"请求异常：{e}", None
+# 获取北京时间
+def get_beijing_time():
+    target_timezone = pytz.timezone('Asia/Shanghai')
+    # 获取当前时间
+    return datetime.now().astimezone(target_timezone)
 
-    def submit_with_retry(self, username, password, steps, retries=3, backoff=2):
-        attempt = 0
-        last_info = None
-        while attempt <= retries:
-            ok, msg, info = self.submit_once(username, password, steps)
-            attempt += 1
-            if not ok:
-                logger.warning(f"提交尝试 {attempt}/{retries+1} 失败: {msg}")
-                last_info = (ok, msg, info)
-                time.sleep(backoff ** attempt)
-                continue
-            # 当请求成功发出（HTTP 层）后，进一步判断返回 JSON 是否确实表示生效
-            info_json = info.get("json") if info else None
-            status = info.get("status") if info else None
-            text = info.get("text") if info else None
 
-            suspicious = False
-            if status != 200:
-                suspicious = True
-                reason = f"HTTP状态码 {status}"
-            else:
-                # 常见正确响应： {"code":200, ...} 或者包含 success:true，message:'success'
-                if info_json:
-                    if (info_json.get("code") == 200) or (info_json.get("success") is True) or ("success" in str(info_json).lower()):
-                        # 看起来是成功的，但仍需核验（如果提供 VERIFY_API）
-                        logger.info("接口返回表面成功，进一步需要校验（如果你启用了 VERIFY_API）")
-                        return True, "接口返回200/成功字段，需要验证是否同步到目标平台", info
-                    else:
-                        suspicious = True
-                        reason = f"返回 JSON 未表现为明确成功: {info_json}"
-                else:
-                    suspicious = True
-                    reason = f"返回非 JSON: {text[:200] if text else ''}"
+# 格式化时间
+def format_now():
+    return get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
 
-            if suspicious:
-                logger.warning(f"提交疑似失败或不可信（尝试 {attempt}/{retries+1}）: {reason}")
-                last_info = (ok, f"疑似失败: {reason}", info)
-                if attempt <= retries:
-                    logger.info(f"等待 {backoff ** attempt} 秒后重试...")
-                    time.sleep(backoff ** attempt)
-                    continue
-                else:
-                    return False, f"多次尝试仍疑似失败: {reason}", info
-        return last_info if last_info else (False, "未知错误", None)
 
-# ---------- 验证 helper（可选） ----------
-def verify_via_api(verify_api, username):
-    """
-    可选：如果你掌握一个查询当前步数的接口（VERIFY_API），在提交后可以调用此函数确认是否真的更新。
-    verify_api 示例: https://your.service/api/get_steps?phone={phone}
-    """
-    if not verify_api:
+# 获取时间戳
+def get_time():
+    current_time = get_beijing_time()
+    return "%.0f" % (current_time.timestamp() * 1000)
+
+
+# 获取登录code
+def get_access_token(location):
+    code_pattern = re.compile("(?<=access=).*?(?=&)")
+    result = code_pattern.findall(location)
+    if result is None or len(result) == 0:
         return None
-    try:
-        url = verify_api.format(phone=username)
-        r = requests.get(url, timeout=10)
-        try:
-            j = r.json()
-        except Exception:
-            j = {"status_code": r.status_code, "text": r.text[:500]}
-        return True, j
-    except Exception as e:
-        return False, f"verify 请求异常: {e}"
+    return result[0]
 
-# ---------- 主流程 ----------
-def run_for_account(idx, total, username, password, cfg):
-    user_d = desensitize(username)
-    log_prefix = f"[{idx+1}/{total}] {user_d}"
+
+def get_error_code(location):
+    code_pattern = re.compile("(?<=error=).*?(?=&)")
+    result = code_pattern.findall(location)
+    if result is None or len(result) == 0:
+        return None
+    return result[0]
+
+
+# pushplus消息推送
+def push_plus(title, content):
+    requestUrl = f"http://www.pushplus.plus/send"
+    data = {
+        "token": PUSH_PLUS_TOKEN,
+        "title": title,
+        "content": content,
+        "template": "html",
+        "channel": "wechat"
+    }
     try:
-        steps = calc_step_range()
-        target_api = os.environ.get("TARGET_STEP_API", DEFAULT_TARGET_API)
-        dry_run = os.environ.get("DRY_RUN", "false").lower() == "true"
-        verbose = os.environ.get("VERBOSE", "false").lower() == "true"
-        submitter = StepSubmitter(target_api, dry_run=dry_run, verbose=verbose)
-        ok, msg, info = submitter.submit_with_retry(username, password, steps, retries=3, backoff=2)
-        if ok:
-            logger.info(f"{log_prefix} - ✅ {msg}")
+        response = requests.post(requestUrl, data=data)
+        if response.status_code == 200:
+            json_res = response.json()
+            print(f"pushplus推送完毕：{json_res['code']}-{json_res['msg']}")
         else:
-            logger.error(f"{log_prefix} - ❌ {msg}")
-        # 如果配置了 VERIFY_API，尝试去查询当前步数确认
-        verify_api = os.environ.get("VERIFY_API", "")
-        if verify_api:
-            v_ok, v_res = verify_via_api(verify_api, username)
-            if v_ok:
-                logger.info(f"{log_prefix} - VERIFY API 返回: {v_res}")
+            print("pushplus推送失败")
+    except:
+        print("pushplus推送异常")
+
+
+class MiMotionRunner:
+    def __init__(self, _user, _passwd):
+        self.user_id = None
+        self.device_id = str(uuid.uuid4())
+        user = str(_user)
+        password = str(_passwd)
+        self.invalid = False
+        self.log_str = ""
+        if user == '' or password == '':
+            self.error = "用户名或密码填写有误！"
+            self.invalid = True
+            pass
+        self.password = password
+        if (user.startswith("+86")) or "@" in user:
+            user = user
+        else:
+            user = "+86" + user
+        if user.startswith("+86"):
+            self.is_phone = True
+        else:
+            self.is_phone = False
+        self.user = user
+        # self.fake_ip_addr = fake_ip()
+        # self.log_str += f"创建虚拟ip地址：{self.fake_ip_addr}\n"
+
+    # 登录
+    def login(self):
+        user_token_info = user_tokens.get(self.user)
+        if user_token_info is not None:
+            access_token = user_token_info.get("access_token")
+            login_token = user_token_info.get("login_token")
+            app_token = user_token_info.get("app_token")
+            self.device_id = user_token_info.get("device_id")
+            self.user_id = user_token_info.get("user_id")
+            if self.device_id is None:
+                self.device_id = str(uuid.uuid4())
+                user_token_info["device_id"] = self.device_id
+            ok,msg = zeppHelper.check_app_token(app_token)
+            if ok:
+                self.log_str += "使用加密保存的app_token\n"
+                return app_token
             else:
-                logger.warning(f"{log_prefix} - VERIFY 请求失败: {v_res}")
-        return {"user": user_d, "success": ok, "msg": msg, "info": info}
-    except Exception as e:
-        logger.error(f"{log_prefix} - 异常：{e}\n{traceback.format_exc()[:400]}")
-        return {"user": user_d, "success": False, "msg": str(e)}
+                self.log_str += f"app_token失效 重新获取 last grant time: {user_token_info.get('app_token_time')}\n"
+                # 检查login_token是否可用
+                app_token, msg = zeppHelper.grant_app_token(login_token)
+                if app_token is None:
+                    self.log_str += f"login_token 失效 重新获取 last grant time: {user_token_info.get('login_token_time')}\n"
+                    login_token, app_token, user_id, msg = zeppHelper.grant_login_tokens(access_token, self.device_id, self.is_phone)
+                    if login_token is None:
+                        self.log_str += f"access_token 已失效：{msg} last grant time:{user_token_info.get('access_token_time')}\n"
+                    else:
+                        user_token_info["login_token"] = login_token
+                        user_token_info["app_token"] = app_token
+                        user_token_info["user_id"] = user_id
+                        user_token_info["login_token_time"] = get_time()
+                        user_token_info["app_token_time"] = get_time()
+                        self.user_id = user_id
+                        return app_token
+                else:
+                    self.log_str += "重新获取app_token成功\n"
+                    user_token_info["app_token"] = app_token
+                    user_token_info["app_token_time"] = get_time()
+                    return app_token
 
-def push_results_stub(results, token, hour_limit, max_count):
-    # 这里保留原 push 逻辑的占位（你可以把原 push_plus 函数接回）
-    success = sum(1 for r in results if r["success"])
-    total = len(results)
-    logger.info("="*40)
-    logger.info(f"总账号数: {total}, 成功: {success}, 失败: {total-success}")
-    logger.info("="*40)
+        # access_token 失效 或者没有保存加密数据
+        access_token, msg = zeppHelper.login_access_token(self.user, self.password)
+        if access_token is None:
+            self.log_str += "登录获取accessToken失败：%s" % msg
+            return None
+        # print(f"device_id:{self.device_id} isPhone: {self.is_phone}")
+        login_token, app_token, user_id, msg = zeppHelper.grant_login_tokens(access_token, self.device_id, self.is_phone)
+        if login_token is None:
+            self.log_str += f"登录提取的 access_token 无效：{msg}"
+            return None
 
-def main():
-    cfg_str = os.environ.get("CONFIG", "{}")
+        user_token_info = dict()
+        user_token_info["access_token"] = access_token
+        user_token_info["login_token"] = login_token
+        user_token_info["app_token"] = app_token
+        user_token_info["user_id"] = user_id
+        # 记录token获取时间
+        user_token_info["access_token_time"] = get_time()
+        user_token_info["login_token_time"] = get_time()
+        user_token_info["app_token_time"] = get_time()
+        if self.device_id is None:
+            self.device_id = uuid.uuid4()
+        user_token_info["device_id"] = self.device_id
+        user_tokens[self.user] = user_token_info
+        return app_token
+
+
+    # 主函数
+    def login_and_post_step(self, min_step, max_step):
+        if self.invalid:
+            return "账号或密码配置有误", False
+        app_token = self.login()
+        if app_token is None:
+            return "登陆失败！", False
+
+        step = str(random.randint(min_step, max_step))
+        self.log_str += f"已设置为随机步数范围({min_step}~{max_step}) 随机值:{step}\n"
+        ok, msg = zeppHelper.post_fake_brand_data(step, app_token, self.user_id)
+        return f"修改步数（{step}）[" + msg + "]", ok
+
+
+# 启动主函数
+def push_to_push_plus(exec_results, summary):
+    # 判断是否需要pushplus推送
+    if PUSH_PLUS_TOKEN is not None and PUSH_PLUS_TOKEN != '' and PUSH_PLUS_TOKEN != 'NO':
+        if PUSH_PLUS_HOUR is not None and PUSH_PLUS_HOUR.isdigit():
+            if time_bj.hour != int(PUSH_PLUS_HOUR):
+                print(f"当前设置push_plus推送整点为：{PUSH_PLUS_HOUR}, 当前整点为：{time_bj.hour}，跳过推送")
+                return
+        html = f'<div>{summary}</div>'
+        if len(exec_results) >= PUSH_PLUS_MAX:
+            html += '<div>账号数量过多，详细情况请前往github actions中查看</div>'
+        else:
+            html += '<ul>'
+            for exec_result in exec_results:
+                success = exec_result['success']
+                if success is not None and success is True:
+                    html += f'<li><span>账号：{exec_result["user"]}</span>刷步数成功，接口返回：{exec_result["msg"]}</li>'
+                else:
+                    html += f'<li><span>账号：{exec_result["user"]}</span>刷步数失败，失败原因：{exec_result["msg"]}</li>'
+            html += '</ul>'
+        push_plus(f"{format_now()} 刷步数通知", html)
+
+
+def run_single_account(total, idx, user_mi, passwd_mi):
+    idx_info = ""
+    if idx is not None:
+        idx_info = f"[{idx + 1}/{total}]"
+    log_str = f"[{format_now()}]\n{idx_info}账号：{desensitize_user_name(user_mi)}\n"
     try:
-        cfg = json.loads(cfg_str)
-    except Exception:
-        logger.error("CONFIG 不是合法 JSON")
-        return
-    config = {**DEFAULT_CONFIG, **cfg}
-    users = config.get("USER", "").split("#")
-    pwds = config.get("PWD", "").split("#")
-    if not users or not users[0] or len(users) != len(pwds):
-        logger.error("账号或密码数量不匹配/为空，请检查 CONFIG")
-        return
-    logger.info(f"加载 {len(users)} 个账号，模式：{'并发(未实现)' if config.get('USE_CONCURRENT','False').lower()=='true' else '串行'}")
-    results = []
-    for i, (u, p) in enumerate(zip(users, pwds)):
-        res = run_for_account(i, len(users), u, p, config)
-        results.append(res)
-        # sleep
-        if i < len(users)-1:
-            try:
-                gap = float(config.get("SLEEP_GAP", 5))
-            except Exception:
-                gap = 5
-            time.sleep(gap)
-    # push summary
-    push_results_stub(results, config.get("PUSH_PLUS_TOKEN",""), config.get("PUSH_PLUS_HOUR",""), int(config.get("PUSH_PLUS_MAX",30)))
+        runner = MiMotionRunner(user_mi, passwd_mi)
+        exec_msg, success = runner.login_and_post_step(min_step, max_step)
+        log_str += runner.log_str
+        log_str += f'{exec_msg}\n'
+        exec_result = {"user": user_mi, "success": success,
+                       "msg": exec_msg}
+    except:
+        log_str += f"执行异常:{traceback.format_exc()}\n"
+        log_str += traceback.format_exc()
+        exec_result = {"user": user_mi, "success": False,
+                       "msg": f"执行异常:{traceback.format_exc()}"}
+    print(log_str)
+    return exec_result
+
+
+def execute():
+    user_list = users.split('#')
+    passwd_list = passwords.split('#')
+    exec_results = []
+    if len(user_list) == len(passwd_list):
+        idx, total = 0, len(user_list)
+        if use_concurrent:
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                exec_results = executor.map(lambda x: run_single_account(total, x[0], *x[1]),
+                                            enumerate(zip(user_list, passwd_list)))
+        else:
+            for user_mi, passwd_mi in zip(user_list, passwd_list):
+                exec_results.append(run_single_account(total, idx, user_mi, passwd_mi))
+                idx += 1
+                if idx < total:
+                    # 每个账号之间间隔一定时间请求一次，避免接口请求过于频繁导致异常
+                    time.sleep(sleep_seconds)
+        if encrypt_support:
+            persist_user_tokens()
+        success_count = 0
+        push_results = []
+        for result in exec_results:
+            push_results.append(result)
+            if result['success'] is True:
+                success_count += 1
+        summary = f"\n执行账号总数{total}，成功：{success_count}，失败：{total - success_count}"
+        print(summary)
+        push_to_push_plus(push_results, summary)
+    else:
+        print(f"账号数长度[{len(user_list)}]和密码数长度[{len(passwd_list)}]不匹配，跳过执行")
+        exit(1)
+
+
+def prepare_user_tokens() -> dict:
+    data_path = r"encrypted_tokens.data"
+    if os.path.exists(data_path):
+        with open(data_path, 'rb') as f:
+            data = f.read()
+        try:
+            decrypted_data = decrypt_data(data, aes_key, None)
+            # 假设原始明文为 UTF-8 编码文本
+            return json.loads(decrypted_data.decode('utf-8', errors='strict'))
+        except:
+            print("密钥不正确或者加密内容损坏 放弃token")
+            return dict()
+    else:
+        return dict()
+
+def persist_user_tokens():
+    data_path = r"encrypted_tokens.data"
+    origin_str = json.dumps(user_tokens, ensure_ascii=False)
+    cipher_data = encrypt_data(origin_str.encode("utf-8"), aes_key, None)
+    with open(data_path, 'wb') as f:
+        f.write(cipher_data)
+        f.flush()
+        f.close()
 
 if __name__ == "__main__":
-    if "CONFIG" not in os.environ:
-        logger.error("未检测到 CONFIG 环境变量，请设置后重试（示例见下方）")
+    # 北京时间
+    time_bj = get_beijing_time()
+    encrypt_support = False
+    user_tokens = dict()
+    if os.environ.__contains__("AES_KEY") is True:
+        aes_key = os.environ.get("AES_KEY")
+        if aes_key is not None:
+            aes_key = aes_key.encode('utf-8')
+            if len(aes_key) == 16:
+                encrypt_support = True
+        if encrypt_support:
+            user_tokens = prepare_user_tokens()
+        else:
+            print("AES_KEY未设置或者无效 无法使用加密保存功能")
+    if os.environ.__contains__("CONFIG") is False:
+        print("未配置CONFIG变量，无法执行")
+        exit(1)
     else:
-        main()
+        # region 初始化参数
+        config = dict()
+        try:
+            config = dict(json.loads(os.environ.get("CONFIG")))
+        except:
+            print("CONFIG格式不正确，请检查Secret配置，请严格按照JSON格式：使用双引号包裹字段和值，逗号不能多也不能少")
+            traceback.print_exc()
+            exit(1)
+        PUSH_PLUS_TOKEN = config.get('PUSH_PLUS_TOKEN')
+        PUSH_PLUS_HOUR = config.get('PUSH_PLUS_HOUR')
+        PUSH_PLUS_MAX = get_int_value_default(config, 'PUSH_PLUS_MAX', 30)
+        sleep_seconds = config.get('SLEEP_GAP')
+        if sleep_seconds is None or sleep_seconds == '':
+            sleep_seconds = 5
+        sleep_seconds = float(sleep_seconds)
+        users = config.get('USER')
+        passwords = config.get('PWD')
+        if users is None or passwords is None:
+            print("未正确配置账号密码，无法执行")
+            exit(1)
+        min_step, max_step = get_min_max_by_time()
+        use_concurrent = config.get('USE_CONCURRENT')
+        if use_concurrent is not None and use_concurrent == 'True':
+            use_concurrent = True
+        else:
+            print(f"多账号执行间隔：{sleep_seconds}")
+            use_concurrent = False
+        # endregion
+        execute()
