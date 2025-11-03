@@ -234,4 +234,28 @@ def main():
     if concurrent:
         max_workers = min(8, len(accounts))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(process_one
+            futures = {ex.submit(process_one, i, len(accounts), acc, submitter): i for i, acc in enumerate(accounts)}
+            for fut in as_completed(futures):
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    logger.error(f"并发任务异常: {e}")
+                    res = {"user": "unknown", "success": False, "msg": str(e)}
+                results.append(res)
+    else:
+        for i, acc in enumerate(accounts):
+            res = process_one(i, len(accounts), acc, submitter)
+            results.append(res)
+            if i < len(accounts) - 1:
+                time.sleep(sleep_gap)
+
+    # 推送
+    push_results(results, token, push_plus_hour, push_plus_max)
+
+    success = sum(1 for r in results if r["success"])
+    failed = len(results) - success
+    logger.info(f"完成: 成功 {success}，失败 {failed}")
+    exit(0 if failed == 0 else 1)
+
+if __name__ == "__main__":
+    main()
