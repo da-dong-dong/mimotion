@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import requests
-import random
-import time
+"""
+main.py
+在 GitHub Actions 上运行：从 CONFIG 环境变量读取账号并提交步数。
+CONFIG 示例（放在 GitHub Secrets -> CONFIG）：
+{
+  "ACCOUNTS": [
+    {"username": "13800001111", "password": "abc123456"},
+    {"username": "test@qq.com", "password": "88888888"}
+  ],
+  "PUSH_PLUS_TOKEN": "",
+  "USE_CONCURRENT": "false",
+  "SLEEP_GAP": 5,
+  "PUSH_PLUS_MAX": 30
+}
+"""
+
+import os
 import json
 import logging
-import traceback
-import re
-import math
-from datetime import datetime
-import pytz
-import os
+import time
 import base64
 import hashlib
+import random
+import traceback
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-# ======================= 日志配置 =======================
+import requests
+
+# ---------- 日志 ----------
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(levelname)s - %(message)s",
@@ -24,107 +38,105 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================= 全局常量 =======================
-TARGET_STEP_API = "https://wzz.wangzouzou.com/motion/api/motion/Xiaomi"
-
+# ---------- 常量（可按需修改） ----------
+TARGET_STEP_API = "https://wzz.wangzouzou.com/motion/api/motion/Xiaomi"  # 请根据实际替换
 DEFAULT_CONFIG = {
-    "MIN_STEP": 6000,
-    "MAX_STEP": 24000,
-    "SLEEP_GAP": 5,
-    "PUSH_PLUS_MAX": 30,
-    "USE_CONCURRENT": "False",
-    "PUSH_PLUS_HOUR": "",
     "PUSH_PLUS_TOKEN": "",
-    "USER": "",
-    "PWD": ""
+    "USE_CONCURRENT": "false",
+    "SLEEP_GAP": 5,
+    "PUSH_PLUS_MAX": 30
 }
 
-# ======================= 工具函数 =======================
-def get_beijing_time():
-    """获取北京时间"""
-    return datetime.now(pytz.timezone("Asia/Shanghai"))
+# 时间段步数范围（示例）
+# STEP_RANGES = {
+#     8: (6000, 10000),
+#     12: (8000, 14000),
+#     14: (10000, 18000),
+#     16: (12000, 22000),
+#     22: (15000, 24000)
+# }
+STEP_RANGES = {
+    8: (29999, 29999),
+    12: (29999, 29999),
+    14: (29999, 29999),
+    16: (29999, 29999),
+    22: (29999, 29999)
+}
 
-def format_now():
-    return get_beijing_time().strftime("%Y-%m-%d %H:%M:%S")
-
-def get_int(cfg, key, default):
-    """安全获取整型"""
+# ---------- 工具函数 ----------
+def load_config_from_env():
+    raw = os.environ.get("CONFIG", "").strip()
+    if not raw:
+        logger.error("CONFIG 环境变量为空。请在 GitHub Secrets 中添加 CONFIG。")
+        return None
     try:
-        return int(cfg.get(key, default))
-    except (ValueError, TypeError):
-        return default
+        cfg = json.loads(raw)
+        return {**DEFAULT_CONFIG, **cfg}
+    except json.JSONDecodeError as e:
+        logger.error(f"解析 CONFIG 失败：JSON 格式错误：{e}")
+        return None
+    except Exception as e:
+        logger.error(f"解析 CONFIG 异常：{e}")
+        return None
 
 def desensitize(user):
-    """账号脱敏"""
-    user = str(user).strip()
-    return f"{user[:3]}****{user[-4:]}" if len(user) > 8 else f"{user[:1]}***{user[-1:]}"
+    u = str(user)
+    if len(u) > 8:
+        return f"{u[:3]}****{u[-4:]}"
+    if len(u) > 2:
+        return f"{u[0]}***{u[-1]}"
+    return u
 
 def push_plus(token, title, content):
-    """PushPlus 推送"""
     if not token:
-        logger.info("未配置PushPlus Token，跳过推送")
         return
-    url = "http://www.pushplus.plus/send"
-    data = {"token": token, "title": title, "content": content, "template": "html"}
     try:
+        url = "http://www.pushplus.plus/send"
+        data = {"token": token, "title": title, "content": content, "template": "html"}
         resp = requests.post(url, data=data, timeout=10)
         if resp.ok and resp.json().get("code") == 200:
-            logger.info("✅ PushPlus 推送成功")
+            logger.info("PushPlus 推送成功")
         else:
-            logger.warning(f"⚠️ PushPlus 推送失败：{resp.text}")
+            logger.warning(f"PushPlus 推送失败：{resp.text}")
     except Exception as e:
         logger.error(f"PushPlus 推送异常：{e}")
 
-# ======================= 步数逻辑 =======================
-def calc_step_range():
-    """根据时间计算步数范围"""
-    now = get_beijing_time()
+def calc_step_for_now():
+    now = datetime.now()
     h = now.hour
-    ranges = {
-        8: (29988, 29999),
-        12: (29988, 29999),
-        14: (29988, 29999),
-        16: (29988, 29999),
-        22: (29988, 29999)
-    }
-    # 找最近时间段
-    closest_hour = min(ranges, key=lambda x: abs(h - x))
-    base_min, base_max = ranges[closest_hour]
-    steps = random.randint(base_min, base_max)
-    logger.info(f"时间[{h}点] 使用配置 {closest_hour} 点范围：{base_min}-{base_max}，生成步数：{steps}")
-    return steps
+    # 找到最近小时配置
+    closest = min(STEP_RANGES.keys(), key=lambda x: abs(x - h))
+    if abs(closest - h) <= 2:
+        lo, hi = STEP_RANGES[closest]
+        return random.randint(lo, hi)
+    # fallback 随机一个合理值
+    return random.randint(6000, 24000)
 
-
-
-# ======================= 提交类 =======================
+# ---------- 提交类 ----------
 class StepSubmitter:
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-        'Accept': 'application/json, text/javascript, */*; q=0.01',
-        'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
-        'Origin': 'https://m.cqzz.top',
-        'Referer': 'https://m.cqzz.top/',
-        'X-Requested-With': 'XMLHttpRequest'
-    }
-
-    def __init__(self):
+    def __init__(self, target_api=TARGET_STEP_API):
         self.s = requests.Session()
+        self.target_api = target_api
+        self.headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Origin": "https://m.cqzz.top",
+            "Referer": "https://m.cqzz.top/",
+            "X-Requested-With": "XMLHttpRequest"
+        }
 
-    def validate(self, username, password):
-        if not username or not password:
-            return False, "账号或密码为空"
-        if re.match(r"^1[3-9]\d{9}$", username) or re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", username):
-            return True, ""
-        return False, "账号格式错误"
-        
-    # ======================= 混淆验证 =======================
+    def insert_str(self, s: str, pos: int, insert_value) -> str:
+        s = s or ""
+        return s[:pos] + str(insert_value) + s[pos:]
+
     def mm(self, xmphone: str, xmpwd: str, time_ms: int) -> str:
-        """构建秘钥"""
+        """混淆签名算法（和原脚本保持一致）"""
         steps = ["4", "1", "0", "2", "3"]
         key = ""
         utc_time = datetime.utcfromtimestamp(time_ms / 1000.0)
         utc_month = utc_time.month - 1
-     
+
         for step in steps:
             if step == "4":
                 time_str = str(time_ms)
@@ -137,13 +149,17 @@ class StepSubmitter:
                 key = self.insert_str(key, utc_month, utc_time.hour)[7:27]
             elif step == "3":
                 key = hashlib.md5(key.encode("utf-8")).hexdigest()
-     
         return key
-     
-    def insert_str(self, s: str, pos: int, insert_value) -> str:
-        s = s or ""
-        return s[:pos] + str(insert_value) + s[pos:]
 
+    def validate(self, username, password):
+        if not username or not password:
+            return False, "账号或密码为空"
+        import re
+        phone = r"^1[3-9]\d{9}$"
+        email = r"^[\w\.-]+@[\w\.-]+\.\w+$"
+        if re.match(phone, username) or re.match(email, username):
+            return True, ""
+        return False, "账号格式错误"
 
     def submit(self, username, password, steps):
         valid, msg = self.validate(username, password)
@@ -152,9 +168,9 @@ class StepSubmitter:
         try:
             time_val = int(time.time() * 1000)
             self.headers["time"] = str(time_val)
-            self.headers["Authorization"] = self.mm(username,password,time_val)
+            self.headers["Authorization"] = self.mm(username, password, time_val)
             resp = self.s.post(
-                TARGET_STEP_API,
+                self.target_api,
                 data={"phone": username, "pwd": password, "num": steps},
                 headers=self.headers,
                 timeout=30
@@ -168,89 +184,96 @@ class StepSubmitter:
         except Exception as e:
             return False, f"请求异常：{e}"
 
-# ======================= 主逻辑 =======================
-def run_account(idx, total, username, password):
-    user_d = desensitize(username)
-    log_prefix = f"[{idx+1}/{total}] {user_d}"
+# ---------- 主执行 ----------
+def process_one(idx, total, account, submitter):
+    user_disp = desensitize(account.get("username", ""))
+    prefix = f"[{idx+1}/{total}] {user_disp}"
     try:
-        steps = calc_step_range()
-        ok, msg = StepSubmitter().submit(username, password, steps)
-        result = {"user": user_d, "success": ok, "msg": msg}
-        logger.info(f"{log_prefix} - {'✅成功' if ok else '❌失败'} - {msg}")
-        return result
+        steps = calc_step_for_now()
+        ok, msg = submitter.submit(account.get("username"), account.get("password"), steps)
+        logger.info(f"{prefix} - {'✅' if ok else '❌'} - {msg}")
+        return {"user": user_disp, "success": ok, "msg": msg}
     except Exception as e:
-        err = f"异常：{e}\n{traceback.format_exc()[:150]}"
-        logger.error(f"{log_prefix} - {err}")
-        return {"user": user_d, "success": False, "msg": err}
+        logger.error(f"{prefix} - 异常: {e}\n{traceback.format_exc()}")
+        return {"user": user_disp, "success": False, "msg": str(e)}
 
-def push_results(results, token, hour_limit, max_count):
-    """推送汇总结果"""
-    if hour_limit and get_beijing_time().hour != int(hour_limit):
-        logger.info(f"非推送指定小时({hour_limit})，跳过推送")
-        return
+def push_results(results, token, push_plus_hour, max_show):
+    if push_plus_hour is not None and str(push_plus_hour).strip() != "":
+        try:
+            if int(push_plus_hour) != datetime.now().hour:
+                logger.info("当前不是推送限制小时，跳过推送")
+                return
+        except Exception:
+            pass
 
-    success = sum(1 for r in results if r["success"])
     total = len(results)
-    summary = f"总账号数: {total}，成功: {success}，失败: {total - success} ({success/total*100:.1f}%成功率)"
-    logger.info("="*50 + f"\n{summary}\n" + "="*50)
+    success = sum(1 for r in results if r["success"])
+    summary = f"总账号数: {total}，成功: {success}，失败: {total - success} ({(success/total*100) if total else 0:.1f}%成功率)"
+    logger.info("="*40 + "\n" + summary + "\n" + "="*40)
 
     if not token:
         return
 
-    title = f"[{format_now()}] 小米步数提交结果"
+    title = f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 小米步数提交结果"
     content = f"<h3>{summary}</h3><ul>"
-    for r in results[:max_count]:
+    for r in results[:max_show]:
         status = "✅成功" if r["success"] else "❌失败"
         content += f"<li>{status} - {r['user']} - {r['msg']}</li>"
     content += "</ul>"
-    if len(results) > max_count:
-        content += f"<p>仅展示前 {max_count} 个账号结果。</p>"
+    if len(results) > max_show:
+        content += f"<p>仅展示前 {max_show} 个账号结果。</p>"
     push_plus(token, title, content)
 
-# ======================= 启动入口 =======================
 def main():
-    cfg_str = os.environ.get("CONFIG", "{}")
-    try:
-        cfg = json.loads(cfg_str)
-    except json.JSONDecodeError:
-        logger.error(f"CONFIG格式错误：{cfg_str}")
-        return
+    cfg = load_config_from_env()
+    if cfg is None:
+        exit(1)
 
-    # 合并默认配置
-    config = {**DEFAULT_CONFIG, **cfg}
-    users = config["USER"].split("#")
-    pwds = config["PWD"].split("#")
+    accounts = cfg.get("ACCOUNTS", [])
+    if not accounts:
+        logger.error("CONFIG 中未包含 ACCOUNTS 或 ACCOUNTS 为空")
+        exit(1)
 
-    if len(users) != len(pwds) or not users[0]:
-        logger.error("账号与密码数量不匹配或为空")
-        return
+    # optional settings
+    token = cfg.get("PUSH_PLUS_TOKEN", "")
+    sleep_gap = float(cfg.get("SLEEP_GAP", 5))
+    concurrent = str(cfg.get("USE_CONCURRENT", "false")).lower() == "true"
+    push_plus_max = int(cfg.get("PUSH_PLUS_MAX", 30))
+    push_plus_hour = cfg.get("PUSH_PLUS_HOUR", "")
 
-    token = config.get("PUSH_PLUS_TOKEN", "")
-    hour_limit = config.get("PUSH_PLUS_HOUR", "")
-    sleep_gap = float(config.get("SLEEP_GAP", 5))
-    concurrent = config.get("USE_CONCURRENT", "false").lower() == "true"
-    max_push = get_int(config, "PUSH_PLUS_MAX", 30)
+    logger.info(f"加载 {len(accounts)} 个账号，模式：{'并发' if concurrent else '串行'}")
 
-    logger.info(f"加载 {len(users)} 个账号，模式：{'并发' if concurrent else '串行'}")
+    submitter = StepSubmitter()
 
     results = []
     if concurrent:
-        with ThreadPoolExecutor(max_workers=min(5, len(users))) as ex:
-            tasks = [ex.submit(run_account, i, len(users), u, p) for i, (u, p) in enumerate(zip(users, pwds))]
-            results = [t.result() for t in as_completed(tasks)]
+        max_workers = min(8, len(accounts))
+        with ThreadPoolExecutor(max_workers=max_workers) as ex:
+            futures = {ex.submit(process_one, i, len(accounts), acc, submitter): i for i, acc in enumerate(accounts)}
+            for fut in as_completed(futures):
+                try:
+                    res = fut.result()
+                except Exception as e:
+                    logger.error(f"并发任务异常: {e}")
+                    res = {"user": "unknown", "success": False, "msg": str(e)}
+                results.append(res)
     else:
-        for i, (u, p) in enumerate(zip(users, pwds)):
-            results.append(run_account(i, len(users), u, p))
-            if i < len(users) - 1:
+        for i, acc in enumerate(accounts):
+            res = process_one(i, len(accounts), acc, submitter)
+            results.append(res)
+            if i < len(accounts) - 1:
                 time.sleep(sleep_gap)
 
-    push_results(results, token, hour_limit, max_push)
+    # 推送
+    push_results(results, token, push_plus_hour, push_plus_max)
 
+    # 汇总并设置退出码（全部成功 -> 0，否则 -> 1）
+    success = sum(1 for r in results if r["success"])
+    failed = len(results) - success
+    logger.info(f"完成: 成功 {success}，失败 {failed}")
+    if failed > 0:
+        exit(1)
+    exit(0)
 
 if __name__ == "__main__":
-    try:
-        if "CONFIG" not in os.environ:
-            raise ValueError("未检测到CONFIG环境变量，请设置账号信息")
-        main()
-    except Exception as e:
-        logger.error(f"启动失败：{e}", exc_info=True)
+    main()
