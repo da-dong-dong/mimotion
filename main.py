@@ -92,32 +92,6 @@ def calc_step_range():
     logger.info(f"时间[{h}点] 使用配置 {closest_hour} 点范围：{base_min}-{base_max}，生成步数：{steps}")
     return steps
 
-# ======================= 混淆验证 =======================
-def mm(self, xmphone: str, xmpwd: str, time_ms: int) -> str:
-    """构建秘钥"""
-    steps = ["4", "1", "0", "2", "3"]
-    key = ""
-    utc_time = datetime.utcfromtimestamp(time_ms / 1000.0)
-    utc_month = utc_time.month - 1
- 
-    for step in steps:
-        if step == "4":
-            time_str = str(time_ms)
-            key = f"{xmphone}{time_str[8:13]}{xmpwd}"
-        elif step == "1":
-            key = base64.b64encode(key.encode("utf-8")).decode("utf-8")
-        elif step == "0":
-            key = self.insert_str(key, utc_time.hour, utc_month)
-        elif step == "2":
-            key = self.insert_str(key, utc_month, utc_time.hour)[7:27]
-        elif step == "3":
-            key = hashlib.md5(key.encode("utf-8")).hexdigest()
- 
-    return key
- 
-def insert_str(self, s: str, pos: int, insert_value) -> str:
-    s = s or ""
-    return s[:pos] + str(insert_value) + s[pos:]
 
 
 # ======================= 提交类 =======================
@@ -140,6 +114,34 @@ class StepSubmitter:
         if re.match(r"^1[3-9]\d{9}$", username) or re.match(r"^[\w\.-]+@[\w\.-]+\.\w+$", username):
             return True, ""
         return False, "账号格式错误"
+        
+    # ======================= 混淆验证 =======================
+    def mm(self, xmphone: str, xmpwd: str, time_ms: int) -> str:
+        """构建秘钥"""
+        steps = ["4", "1", "0", "2", "3"]
+        key = ""
+        utc_time = datetime.utcfromtimestamp(time_ms / 1000.0)
+        utc_month = utc_time.month - 1
+     
+        for step in steps:
+            if step == "4":
+                time_str = str(time_ms)
+                key = f"{xmphone}{time_str[8:13]}{xmpwd}"
+            elif step == "1":
+                key = base64.b64encode(key.encode("utf-8")).decode("utf-8")
+            elif step == "0":
+                key = self.insert_str(key, utc_time.hour, utc_month)
+            elif step == "2":
+                key = self.insert_str(key, utc_month, utc_time.hour)[7:27]
+            elif step == "3":
+                key = hashlib.md5(key.encode("utf-8")).hexdigest()
+     
+        return key
+     
+    def insert_str(self, s: str, pos: int, insert_value) -> str:
+        s = s or ""
+        return s[:pos] + str(insert_value) + s[pos:]
+
 
     def submit(self, username, password, steps):
         valid, msg = self.validate(username, password)
