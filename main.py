@@ -4,17 +4,9 @@
 """
 main.py
 在 GitHub Actions 上运行：从 CONFIG 环境变量读取账号并提交步数。
-CONFIG 示例（放在 GitHub Secrets -> CONFIG）：
-{
-  "ACCOUNTS": [
-    {"username": "13800001111", "password": "abc123456"},
-    {"username": "test@qq.com", "password": "88888888"}
-  ],
-  "PUSH_PLUS_TOKEN": "",
-  "USE_CONCURRENT": "false",
-  "SLEEP_GAP": 5,
-  "PUSH_PLUS_MAX": 30
-}
+支持两种账号配置：
+1. 老模式：USER 和 PWD，用 # 分隔多账号
+2. 新模式：ACCOUNTS 列表 [{"username": "...", "password": "..."}]
 """
 
 import os
@@ -27,8 +19,9 @@ import random
 import traceback
 from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
-
 import requests
+import pytz
+import re
 
 # ---------- 日志 ----------
 logging.basicConfig(
@@ -38,8 +31,8 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ---------- 常量（可按需修改） ----------
-TARGET_STEP_API = "https://wzz.wangzouzou.com/motion/api/motion/Xiaomi"  # 请根据实际替换
+# ---------- 常量 ----------
+TARGET_STEP_API = "https://wzz.wangzouzou.com/motion/api/motion/Xiaomi"
 DEFAULT_CONFIG = {
     "PUSH_PLUS_TOKEN": "",
     "USE_CONCURRENT": "false",
@@ -47,34 +40,24 @@ DEFAULT_CONFIG = {
     "PUSH_PLUS_MAX": 30
 }
 
-# 时间段步数范围（示例）
-# STEP_RANGES = {
-#     8: (6000, 10000),
-#     12: (8000, 14000),
-#     14: (10000, 18000),
-#     16: (12000, 22000),
-#     22: (15000, 24000)
-# }
+# 时间段步数范围
 STEP_RANGES = {
-    8: (29999, 29999),
-    12: (29999, 29999),
-    14: (29999, 29999),
-    16: (29999, 29999),
-    22: (29999, 29999)
+    8: (29988, 29999),
+    12: (29988, 29999),
+    14: (29988, 29999),
+    16: (29988, 29999),
+    22: (29988, 29999)
 }
 
 # ---------- 工具函数 ----------
 def load_config_from_env():
     raw = os.environ.get("CONFIG", "").strip()
     if not raw:
-        logger.error("CONFIG 环境变量为空。请在 GitHub Secrets 中添加 CONFIG。")
+        logger.error("CONFIG 环境变量为空。请在 GitHub Secrets 中添加 CONFIG 或使用老版 USER/PWD")
         return None
     try:
         cfg = json.loads(raw)
         return {**DEFAULT_CONFIG, **cfg}
-    except json.JSONDecodeError as e:
-        logger.error(f"解析 CONFIG 失败：JSON 格式错误：{e}")
-        return None
     except Exception as e:
         logger.error(f"解析 CONFIG 异常：{e}")
         return None
@@ -102,14 +85,12 @@ def push_plus(token, title, content):
         logger.error(f"PushPlus 推送异常：{e}")
 
 def calc_step_for_now():
-    now = datetime.now()
+    now = datetime.now(pytz.timezone("Asia/Shanghai"))
     h = now.hour
-    # 找到最近小时配置
     closest = min(STEP_RANGES.keys(), key=lambda x: abs(x - h))
     if abs(closest - h) <= 2:
         lo, hi = STEP_RANGES[closest]
         return random.randint(lo, hi)
-    # fallback 随机一个合理值
     return random.randint(6000, 24000)
 
 # ---------- 提交类 ----------
@@ -118,29 +99,28 @@ class StepSubmitter:
         self.s = requests.Session()
         self.target_api = target_api
         self.headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
-            "Origin": "https://m.cqzz.top",
-            "Referer": "https://m.cqzz.top/",
-            "X-Requested-With": "XMLHttpRequest"
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.7339.128 Safari/537.36',
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+            'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
+            'Origin': 'https://m.cqzz.top',
+            'Referer': 'https://m.cqzz.top/',
+            'X-Requested-With': 'XMLHttpRequest'
         }
+        self.base_url = 'https://wzz.wangzouzou.com/motion/api/motion/Xiaomi'
 
     def insert_str(self, s: str, pos: int, insert_value) -> str:
         s = s or ""
         return s[:pos] + str(insert_value) + s[pos:]
 
     def mm(self, xmphone: str, xmpwd: str, time_ms: int) -> str:
-        """混淆签名算法（和原脚本保持一致）"""
         steps = ["4", "1", "0", "2", "3"]
         key = ""
         utc_time = datetime.utcfromtimestamp(time_ms / 1000.0)
         utc_month = utc_time.month - 1
-
         for step in steps:
             if step == "4":
-                time_str = str(time_ms)
-                key = f"{xmphone}{time_str[8:13]}{xmpwd}"
+                key = f"{xmphone}{str(time_ms)[8:13]}{xmpwd}"
             elif step == "1":
                 key = base64.b64encode(key.encode("utf-8")).decode("utf-8")
             elif step == "0":
@@ -154,7 +134,6 @@ class StepSubmitter:
     def validate(self, username, password):
         if not username or not password:
             return False, "账号或密码为空"
-        import re
         phone = r"^1[3-9]\d{9}$"
         email = r"^[\w\.-]+@[\w\.-]+\.\w+$"
         if re.match(phone, username) or re.match(email, username):
@@ -198,14 +177,13 @@ def process_one(idx, total, account, submitter):
         return {"user": user_disp, "success": False, "msg": str(e)}
 
 def push_results(results, token, push_plus_hour, max_show):
-    if push_plus_hour is not None and str(push_plus_hour).strip() != "":
+    if push_plus_hour:
         try:
-            if int(push_plus_hour) != datetime.now().hour:
+            if int(push_plus_hour) != datetime.now(pytz.timezone("Asia/Shanghai")).hour:
                 logger.info("当前不是推送限制小时，跳过推送")
                 return
-        except Exception:
+        except:
             pass
-
     total = len(results)
     success = sum(1 for r in results if r["success"])
     summary = f"总账号数: {total}，成功: {success}，失败: {total - success} ({(success/total*100) if total else 0:.1f}%成功率)"
@@ -226,54 +204,34 @@ def push_results(results, token, push_plus_hour, max_show):
 
 def main():
     cfg = load_config_from_env()
-    if cfg is None:
+    if not cfg:
         exit(1)
 
-    accounts = cfg.get("ACCOUNTS", [])
+    # --- 兼容 ACCOUNTS 或老版 USER/PWD ---
+    accounts = cfg.get("ACCOUNTS")
     if not accounts:
-        logger.error("CONFIG 中未包含 ACCOUNTS 或 ACCOUNTS 为空")
-        exit(1)
+        user_raw = cfg.get("USER", "")
+        pwd_raw = cfg.get("PWD", "")
+        if not user_raw or not pwd_raw:
+            logger.error("CONFIG 缺少 ACCOUNTS 或 USER/PWD 信息")
+            exit(1)
+        users = str(user_raw).split("#")
+        pwds = str(pwd_raw).split("#")
+        if len(users) != len(pwds):
+            logger.error("USER 与 PWD 数量不一致")
+            exit(1)
+        accounts = [{"username": u, "password": p} for u, p in zip(users, pwds)]
 
-    # optional settings
     token = cfg.get("PUSH_PLUS_TOKEN", "")
     sleep_gap = float(cfg.get("SLEEP_GAP", 5))
     concurrent = str(cfg.get("USE_CONCURRENT", "false")).lower() == "true"
     push_plus_max = int(cfg.get("PUSH_PLUS_MAX", 30))
     push_plus_hour = cfg.get("PUSH_PLUS_HOUR", "")
 
-    logger.info(f"加载 {len(accounts)} 个账号，模式：{'并发' if concurrent else '串行'}")
-
     submitter = StepSubmitter()
-
     results = []
+
     if concurrent:
         max_workers = min(8, len(accounts))
         with ThreadPoolExecutor(max_workers=max_workers) as ex:
-            futures = {ex.submit(process_one, i, len(accounts), acc, submitter): i for i, acc in enumerate(accounts)}
-            for fut in as_completed(futures):
-                try:
-                    res = fut.result()
-                except Exception as e:
-                    logger.error(f"并发任务异常: {e}")
-                    res = {"user": "unknown", "success": False, "msg": str(e)}
-                results.append(res)
-    else:
-        for i, acc in enumerate(accounts):
-            res = process_one(i, len(accounts), acc, submitter)
-            results.append(res)
-            if i < len(accounts) - 1:
-                time.sleep(sleep_gap)
-
-    # 推送
-    push_results(results, token, push_plus_hour, push_plus_max)
-
-    # 汇总并设置退出码（全部成功 -> 0，否则 -> 1）
-    success = sum(1 for r in results if r["success"])
-    failed = len(results) - success
-    logger.info(f"完成: 成功 {success}，失败 {failed}")
-    if failed > 0:
-        exit(1)
-    exit(0)
-
-if __name__ == "__main__":
-    main()
+            futures = {ex.submit(process_one
