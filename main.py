@@ -12,6 +12,8 @@ import math
 from datetime import datetime
 import pytz
 import os
+import base64
+import hashlib
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ======================= 日志配置 =======================
